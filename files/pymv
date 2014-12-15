@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+import os
+import collections
+import re
+import shutil
+import argparse
+import fcntl
+import termios
+import struct
+import sys
+import itertools
+inf = float("inf")
+
+
+def parse_args():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-d", "--depth", type=int, default=inf,
+                        help="subfolder search depth")
+    parser.add_argument("--no-confirm", action="store_true",
+                        help="don't ask for confirmation")
+    parser.add_argument("-p", "--preserve-emptied", action="store_true",
+                        help="don't auto-delete emptied directories")
+    parser.add_argument("--no-rename-dirs", action="store_true",
+                        help="only regular files will be renamed")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    exprsyntax = parser.add_mutually_exclusive_group()
+    exprsyntax.add_argument("-f", "--functor", action="store_true",
+                            help="match and replace are lambdas")
+    exprsyntax.add_argument("-a", "--advanced", action="store_true",
+                            help="match is a full-blown regex")
+    parser.add_argument("-i", "--ignore-case", action="store_true",
+                        help="ignore case for matching filenames")
+    parser.add_argument("match",
+                        help="expression to match the old filename against")
+    parser.add_argument("replace",
+                        help="new filename")
+
+    return parser.parse_args()
+
+
+def ttywidth(fd=1):
+    if not os.isatty(fd):
+        return inf
+
+    request = struct.pack('HHHH', 0, 0, 0, 0)
+    reply = fcntl.ioctl(fd, termios.TIOCGWINSZ, request)
+    h, w, hp, wp = struct.unpack('HHHH', reply)
+
+    return w
+
+
+def main(args):
+    if args.verbose:
+        print("argv:\n\t" + "\n\t".join(sys.argv))
+
+    # dynamic queue that contains all still-to-be-serached directories
+    dirstosearch = collections.deque([""])
+
+    # contains all renamings as (from->to) tuples
+    renamings = []
+
+    # contains all dirs where files are being renamed, i.e. dirs that are
+    # flagged for deletion if they are empty after renaming.
+    dirswithrenamedfiles = set()
+
+    if args.functor:
+        matchfun = eval("lambda f: " + args.match)
+        replacefun = eval("lambda f: " + args.replace)
+    else:
+        if not args.advanced:
+            args.match = args.match.replace(".", "\.")
+            args.match = args.match.replace("*", "([^/]*)")
+            args.match = args.match.replace("?", "([^/])")
+            args.match = args.match.replace("%d", "([0-9]+)")
+            args.match = args.match.replace("%x", "*")
+            args.match = args.match.replace("%q", "?")
+            args.match = args.match.replace("%p", ".")
+            args.match = args.match.replace("%%", "%")
+            args.match = "^" + args.match + "$"
+
+            cb = lambda m: "\g<" + str(next(cb.c)) + ">"
+            cb.c = itertools.count()
+            next(cb.c)
+            args.replace = re.sub("\\*", cb, args.replace)
+
+        print("matcher:  \x1b[31;1m" + args.match + "\x1b[m")
+        print("replacer: \x1b[31;1m" + args.replace + "\x1b[m")
+
+        pattern = re.compile(args.match,
+                             flags=args.ignore_case and re.IGNORECASE or 0)
+        matchfun = pattern.match
+        replacefun = lambda f: pattern.sub(args.replace, f, 1)
+
+    while len(dirstosearch) > 0:
+        dirname = dirstosearch.pop()
+        for f in sorted(os.listdir("./" + dirname)):
+            if dirname:
+                f = dirname + "/" + f
+            isdir = os.path.isdir(f) and not os.path.islink(f)
+            renamed = False
+            if not args.no_rename_dirs or not isdir:
+                if matchfun(f):
+                    newname = os.path.relpath(replacefun(f))
+                    if newname != f:
+                        renamings.append((f, newname))
+                        renamed = True
+                        if not args.preserve_emptied:
+                            dirswithrenamedfiles.add(dirname)
+            if isdir and not renamed and f.count('/') < args.depth:
+                dirstosearch.appendleft(f)
+
+    # do a sanity check on renamings
+    errors = []
+    lookup = collections.defaultdict(lambda: set())
+    for f, t in renamings:
+        lookup[t].add(f)
+    for t, fs in lookup.items():
+        # check for identical target names
+        if len(fs) != 1:
+            errors.append("multiple files would be renamed to " + t + ":" +
+                          "\n\t" + "\n\t".join(sorted(fs)))
+
+        # check for target names that already exist
+        if os.path.exists(t):
+            errors.append("can't move " + fs.pop() + " to " + t + ": " +
+                          "file exists.")
+
+    if errors:
+        for error in errors:
+            print(error)
+        print("\nsanity check yielded " + str(len(errors)) + " errors.")
+        print("refusing to continue.")
+        return
+
+    if not renamings:
+        print("no matches")
+        return
+
+    if not args.no_confirm:
+        # ask for confirmation
+        maxf = max((len(f) for f, t in renamings))
+        maxt = max((len(t) for f, t in renamings))
+        ttyw = ttywidth()
+
+        print("")
+        if maxf + maxt + 3 <= ttyw:
+            # no need to worry about tty width
+            for f, t in renamings:
+                print(f.ljust(maxf) + " \x1b[32;1m>\x1b[m " + t)
+        else:
+            # use 1+ line for from/to each
+            for f, t in renamings:
+                print("\x1b[36;1m>\x1b[m " + f)
+                print("\x1b[32;1m>\x1b[m " + t)
+
+        print("\n" + str(len(renamings)) + " files will be renamed.")
+        try:
+            confirm = input("Do you want to continue [Y/n]? ")
+        except KeyboardInterrupt:
+            print("")
+            return
+
+        if confirm not in {"", "y", "Y"}:
+            return
+
+    # do the renaming
+    for f, t in renamings:
+        tdir = os.path.dirname(t)
+        if tdir and not os.path.exists(tdir):
+            print("mkdir " + tdir)
+            os.makedirs(tdir)
+
+        shutil.move(f, t)
+
+    # delete emptied dirs
+    for d in dirswithrenamedfiles:
+        while True:
+            if not d:
+                break
+            if os.listdir(d):
+                break
+            print("rmdir " + d)
+            os.rmdir(d)
+            d = os.path.relpath(d + '/..')
+
+if __name__ == '__main__':
+    main(parse_args())
