@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+#
+# Combined Converter and CoPier (yes, that's totally not a forced acronym).
+#
+# (c) 2014 by Michael Ensslin <michael@ensslin.cc>
+
+import os
+
+
+def flag():
+    """
+    returns the glorious flag of the glorious CCCP, in glorious
+    UTF-8/256-color ECMA-48.
+
+    Yes, it could be better, but there's only so much you can do with
+    a monospaced font in a 256-color terminal.
+    also I have better things to do (theoretically).
+    """
+
+    def glorify(s):
+        return '\x1b[38;5;220m\x1b[48;5;160m' + s + '\x1b[m'
+
+    return '\n'.join([glorify(' \u2605' + ' ' * 14),
+                      glorify(' \u262d' + ' ' * 14),
+                      glorify(' ' * 16),
+                      glorify(' ' * 16)])
+
+
+def parse_args():
+    """
+    your typical argparser
+    """
+
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument('--opus', type=int,
+                   help='convert WAV, MP3, FLAC to OGG/Opus (specify kbit/s)')
+    p.add_argument('srcs', nargs='+', metavar='FILE')
+    p.add_argument('dstdir', metavar='TARGET')
+
+    args = p.parse_args()
+
+    return args
+
+
+class CCCPError(Exception):
+    """
+    base exception class
+    """
+    pass
+
+
+class CCCP:
+    """
+    combined converter and copier (abstract base class)
+    """
+
+    active_cccps = []
+
+    class UnfittingFile(CCCPError):
+        pass
+
+    def __init__(self, srcdir, dstdir, name):
+        """
+        raises UnfittingType, sets self.dst, prepares self.cccp()
+        """
+        raise NotImplementedError()
+
+    def cccp():
+        """ converts src, saving it at dst """
+        raise NotImplementedError()
+
+    @classmethod
+    def factory(cls, srcdir, dstdir, name):
+        """
+        this factory is, of course, collectively-owned by its heroic
+        workers.
+
+        it produces only the highest-quality soviet CCCP objects,
+        precisely designed to match the source file.
+
+        exploitative capitalist factories from all over the world stand in
+        awe of its unmatched supply of high-quality CCCP classes, which it
+        takes from CCCP.active_cccps.
+        """
+
+        for cccp in cls.active_cccps:
+            try:
+                return cccp(srcdir, dstdir, name)
+            except cls.UnfittingFile:
+                pass
+
+        # our heroic workers have failed; time to build another gulag.
+        raise CCCPError("internal error: CCCP.factory failed to find a " +
+                        "fitting CCCP for '" + src + "'")
+
+
+class CPFile(CCCP):
+    """
+    plain file copy
+    """
+    def __init__(self, srcdir, dstdir, name):
+        self.src = srcdir + '/' + name
+        self.dst = dstdir + '/' + name
+
+        if not os.path.exists(self.src):
+            raise CCCPError("cannot stat '" + src + "': " +
+                            "No such file or directory")
+
+        if os.path.isdir(self.dst):
+            raise CCCPError("cannot overwrite directory '" + self.dst +
+                                "' with non-directory")
+
+    def cccp(self):
+        print("cp '" + self.src + "' '" + self.dst + "'")
+        srcf = open(self.src, 'rb')
+        dstf = open(self.dst, 'wb')
+
+        # copy in 8MB-chunks
+        while dstf.write(srcf.read(8388608)):
+            pass
+
+        srcf.close()
+        dstf.close()
+
+        # preserve x flag
+        if os.stat(self.src).st_mode & (64 + 8 + 1):
+            os.chmod(self.dst, os.stat(self.dst).st_mode | (64 + 8 + 1))
+
+
+class CPDir(CCCP):
+    """
+    recursive directory copy
+    """
+    def __init__(self, srcdir, dstdir, name):
+        self.src = srcdir + '/' + name
+        self.dst = dstdir + '/' + name
+
+        if not os.path.isdir(self.src):
+            raise CCCP.UnfittingFile()
+
+        if os.path.exists(self.dst) and not os.path.isdir(self.dst):
+            raise CCCPError("cannot overwrite non-directory '" + dst +
+                            "' with directory '" + src + "'")
+
+        self.subcccps = []
+        for entry in sorted(os.listdir(self.src)):
+            self.subcccps.append(CCCP.factory(self.src, self.dst, entry))
+
+        dsts = set()
+        for subcccp in self.subcccps:
+            if os.path.abspath(subcccp.src) == os.path.abspath(subcccp.dst):
+                raise CCCPError("'" + subcccp.src + "' and " +
+                                "'" + subcccp.dst + "' are the same file")
+            if subcccp.dst in dsts:
+                raise CCCPError("cannot CCCP multiple files to '" + dst + "'")
+            else:
+                dsts.add(subcccp.dst)
+
+    def cccp(self):
+        if not os.path.exists(self.dst):
+            print("mkdir '" + self.dst + "'")
+            os.mkdir(self.dst)
+
+        for subcccp in self.subcccps:
+            subcccp.cccp()
+
+
+class OpusConvert(CCCP):
+    def __init__(self, srcdir, dstdir, name):
+        self.src = srcdir + '/' + name
+
+        if not os.path.isfile(self.src):
+            raise CCCP.UnfittingFile()
+
+        barename, ext = os.path.splitext(name)
+        ext = ext.lower()[1:]
+
+        if ext not in {'mp3', 'flac', 'wav'}:
+            raise CCCP.UnfittingFile()
+
+        self.ext = ext
+        self.dst = dstdir + '/' + barename + '.opus'
+
+    def cccp(self):
+        import subprocess
+        print("opusenc '" + self.src + "' '" + self.dst + "'")
+
+        if self.ext == 'mp3':
+            decoder = subprocess.Popen(['mpg123', '-w', '-', self.src],
+                                        stdout=subprocess.PIPE)
+            encoder = subprocess.Popen(['opusenc', '--bitrate', self.quality,
+                                        '--', '-', self.dst],
+                                        stdin=decoder.stdout)
+            encoder.communicate()
+        elif self.ext == 'flac' or self.ext == 'wav':
+            subprocess.call(['opusenc', '--bitrate', self.quality,
+                             '--', self.src, self.dst])
+        else:
+            raise CCCPError('OpusConvert: wrong file ext on ' + self.src)
+
+def main():
+    print(flag())
+    args = parse_args()
+
+    if args.opus:
+        OpusConvert.quality = str(args.opus)
+        CCCP.active_cccps.append(OpusConvert)
+    CCCP.active_cccps.append(CPDir)
+    CCCP.active_cccps.append(CPFile)
+
+    if not os.path.isdir(args.dstdir):
+        raise CCCPError("target `" + args.dstdir + "` is not a directory")
+
+    cccps = []
+    for src in args.srcs:
+        if not src.rstrip('/'):
+            srcdir, name = '/', '/'
+        else:
+            src = src.rstrip('/')
+            # it is now guaranteed that tail will not be empty
+
+            srcdir, name = os.path.split(src)
+            if not srcdir:
+                srcdir = '.'
+
+        cccps.append(CCCP.factory(srcdir, args.dstdir, name))
+
+    for cccp in cccps:
+        cccp.cccp()
+
+if __name__ == '__main__':
+    try:
+        main()
+    except CCCPError as e:
+        print(e)
