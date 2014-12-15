@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+import os
+import sys
+import readline
+import itertools
+
+
+def simplify(s):
+    deletechars = " ._-'\"\\()[]?!`=^"
+    return s.translate(str.maketrans("", "", deletechars)).lower()
+
+
+def contains_similar(s, part):
+    return simplify(part) in simplify(s)
+
+
+class Completer:
+    def __init__(self, path):
+        self.path = path
+
+    def find_completions(self, text):
+        dirname, basename = os.path.split(text)
+        if not dirname:
+            dirname = '.'
+
+        if dirname.startswith('/'):
+            prefix = ''
+        else:
+            prefix = self.path + '/'
+
+
+        if not os.path.isdir(prefix + dirname):
+            return []
+
+        dirs, files = [], []
+        for name in os.listdir(prefix + dirname):
+            if not name.startswith(basename):
+                continue
+            if dirname != '.':
+                name = dirname + '/' + name
+            if os.path.isdir(prefix + name):
+                dirs.append(name + '/')
+            else:
+                files.append(name)
+
+        return dirs + files
+
+    def complete(self, text, state):
+        if state == 0:
+            self.matches = self.find_completions(text)
+        try:
+            return self.matches[state]
+        except IndexError:
+            return None
+
+
+def input_default(prompt="", default="", completepath=None):
+    if completepath:
+        readline.set_completer(Completer(completepath).complete)
+        readline.parse_and_bind("tab: complete")
+        readline.set_completer_delims('')
+    readline.set_startup_hook(lambda: readline.insert_text(default))
+    try:
+        return input(prompt)
+    finally:
+        readline.set_startup_hook()
+        if completepath:
+            readline.set_completer(None)
+
+
+def ls(filename, a=False, l=False):
+    import subprocess
+    commands = ['ls', '--color=auto']
+    if a:
+        commands.append('-a')
+    if l:
+        commands.append('-l')
+
+    commands.append('--')
+    if type(filename) == list:
+        commands += filename
+    else:
+        commands.append(filename)
+    subprocess.call(commands)
+
+
+if len(sys.argv) != 2:
+    print("usage: %s dir" % sys.argv[0])
+    exit(1)
+
+pardir = sys.argv[1]
+if pardir.endswith('/'):
+    pardir = pardir[:-1]
+
+if not os.path.isdir(pardir):
+    if not os.path.exists(pardir):
+        print("directory does not exist: %s" % pardir)
+    else:
+        print("not a directory: %s" % pardir)
+    exit(1)
+
+# walk the directory structure until we arrive in a folder that contains
+# more than just an other folder
+dirstack = [pardir]
+while True:
+    src = dirstack[-1]
+    files = os.listdir(src)
+    if not files:
+        pardirpath = os.path.dirname(pardir)
+        if not pardirpath:
+            pardirpath = '.'
+            deletables = src
+        else:
+            deletables = src[len(pardirpath) + 1:]
+        print("empty: %s/\x1b[1m%s\x1b[m" % (pardirpath, deletables))
+        if input("delete? [Y/n]") in {"Y", "y", ""}:
+            for d in reversed(dirstack):
+                os.rmdir(d)
+        exit(0)
+
+    if len(files) > 1:
+        break
+
+    src = "%s/%s" % (src, files[0])
+    if os.path.islink(src) or not os.path.isdir(src):
+        break
+    dirstack.append(src)
+
+if len(dirstack) == 1:
+    print("cannot collapse dir: %s contains multiple files:")
+    ls(pardir, a=True)
+    exit(1)
+
+container = os.path.dirname(pardir)
+if not container:
+    container = '.'
+    srcbasename = src
+else:
+    srcbasename = src[len(container) + 1:]
+
+suggestions = []
+for part in srcbasename.split('/'):
+    # try to avoid redundant path name components
+    if contains_similar("".join(suggestions), part):
+        pass
+
+    suggestions = [s for s in suggestions if not contains_similar(part, s)]
+    suggestions.append(part)
+
+tgtbasename = "_".join(suggestions)
+tmpname = None
+
+while True:
+    print("within %s, rename:" % container)
+    print(src)
+    tgtbasename = input_default(default=tgtbasename, completepath=container)
+    if not tgtbasename:
+        print("please enter a target name.")
+        continue
+
+    if tgtbasename.endswith('/'):
+        tgtbasename = tgtbasename[:-1]
+
+    if container == '.':
+        tgt = tgtbasename
+    else:
+        tgt = "%s/%s" % (container, tgtbasename)
+
+    # check if the target name already exists, and is not part of the source
+    if os.path.exists(tgt) and tgt not in dirstack:
+        print("file exists: %s" % tgt)
+        ls(tgt, l=True)
+        continue
+
+    # check if the target path contains a directory with an existing filename
+    tgtpath = container
+    illegal = False
+    for part in tgtbasename.split('/'):
+        tgtpath = "%s/%s" % (tgtpath, part)
+        if not os.path.exists(tgtpath):
+            break
+        if not os.path.isdir(tgtpath):
+            print("not a directory")
+            ls(tgtpath, l=True)
+            illegal = True
+            break
+    if illegal:
+        continue
+
+    break
+
+# so, we want to move src to tgt, then rmdir -r src
+# steps:
+#     mv src container/tempfilename
+#     rmdir on dirstack[:-1]
+#     mkdir -p tgt/..
+#     mv container/tempfilename tgt
+for x in itertools.count():
+    tempfilename = "%s/temp%d" % (container, x)
+    if not os.path.exists(tempfilename):
+        break
+os.rename(src, tempfilename)
+
+for d in reversed(dirstack[:-1]):
+    os.rmdir(d)
+
+creat = os.path.dirname(tgt)
+if creat and not os.path.exists(creat):
+    os.makedirs(creat)
+
+os.rename(tempfilename, tgt)
